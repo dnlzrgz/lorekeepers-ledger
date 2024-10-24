@@ -1,21 +1,32 @@
 import scrapy
+from environs import Env
+from itemloaders.processors import MapCompose, TakeFirst
 from scrapy.crawler import CrawlerProcess
 from scrapy.loader import ItemLoader
-from itemloaders.processors import MapCompose, TakeFirst
 from w3lib.html import remove_tags
-from environs import Env
 
 
 def remove_white_spaces(value):
-    return value.strip().replace("\n", "")
-
-
-def format_isbn(value):
-    return value.replace("book_", "").replace("-", "")
+    return value.strip().replace("\n", "").replace("\r", "")
 
 
 def remove_currency_symbol(value):
     return float(value.replace("€", "").strip().replace(",", "."))
+
+
+def remove_dashes(value):
+    return value.replace("-", "")
+
+
+def format_author_name(value):
+    if "/" in value:
+        value = value.split("/")[0].strip()
+
+    if "," in value:
+        last, first = value.split(",", 1)
+        return f"{first.strip()} {last.strip()}"
+
+    return value
 
 
 class Book(scrapy.Item):
@@ -24,56 +35,62 @@ class Book(scrapy.Item):
         output_processor=TakeFirst(),
     )
     author = scrapy.Field(
-        input_processor=MapCompose(remove_tags, remove_white_spaces),
-        output_processor=TakeFirst(),
-    )
-    isbn = scrapy.Field(
         input_processor=MapCompose(
-            remove_tags,
-            remove_white_spaces,
-            format_isbn,
+            remove_tags, remove_white_spaces, format_author_name
         ),
         output_processor=TakeFirst(),
     )
-    summary = scrapy.Field(
-        input_processor=MapCompose(remove_tags, remove_white_spaces),
-        output_processor=TakeFirst(),
-    )
+    url = scrapy.Field()
     price = scrapy.Field(
         input_processor=MapCompose(
             remove_tags, remove_white_spaces, remove_currency_symbol
         ),
         output_processor=TakeFirst(),
     )
-    book_url = scrapy.Field()
-    # cover_image = scrapy.Field()
-    # publisher = scrapy.Field()
-    # publication_date = scrapy.Field()
-    # categories = scrapy.Field()
+    isbn = scrapy.Field(
+        input_processor=MapCompose(remove_tags, remove_white_spaces, remove_dashes),
+        output_processor=TakeFirst(),
+    )
+    publisher = scrapy.Field(
+        input_processor=MapCompose(remove_tags, remove_white_spaces),
+        output_processor=TakeFirst(),
+    )
+    publication_date = scrapy.Field(
+        input_processor=MapCompose(remove_tags, remove_white_spaces),
+        output_processor=TakeFirst(),
+    )
 
 
 class TodosTusLibrosSpider(scrapy.Spider):
-    name = "todostuslibros"
+    name = "todos_tus_libros"
     start_urls = ["https://www.todostuslibros.com/mas_vendidos"]
 
     def parse(self, response):
-        for book in response.css("li.book"):
-            loader = ItemLoader(Book(), selector=book)
-            loader.add_css("title", "div.book-details h2.title a::text")
-            loader.add_css("author", "div.book-details h3.author a::text")
-            loader.add_css("isbn", "li::attr(id)")
-            loader.add_css("summary", "p.synopsis::text")
-            loader.add_css("book_url", "div.book-details h2.title a::attr(href)")
-            loader.add_css(
-                "price", "div.book-action__content--top .book-price strong::text"
-            )
-            yield loader.load_item()
+        books = response.css("li.book")
+        for book in books:
+            book_url = book.css("h2.title a::attr(href)").get()
+            if book_url:
+                yield response.follow(book_url, self.parse_book)
 
         next_page = response.css(
             "ul.pagination li.page-item a[rel='next']::attr(href)"
         ).get()
-        if next_page is not None:
+        if next_page:
             yield response.follow(next_page, self.parse)
+
+    def parse_book(self, response):
+        loader = ItemLoader(Book(), response=response)
+        loader.add_css("title", "h1.title::text")
+        loader.add_css("author", "a.author::text")
+        loader.add_value("url", response.url)
+        loader.add_css("price", "div.total-book-price strong::text")
+        loader.add_css("isbn", "dt:contains('ISBN:') + dd::text")
+        loader.add_css("publisher", "dt:contains('Editorial:') + dd a::text")
+        loader.add_css(
+            "publication_date", "dt:contains('Fecha publicación :') + dd::text"
+        )
+
+        yield loader.load_item()
 
 
 if __name__ == "__main__":
@@ -103,7 +120,7 @@ if __name__ == "__main__":
             ),
             "DOWNLOAD_DELAY": env.float(
                 "DOWNLOAD_DELAY",
-                1,
+                2,
             ),
             "DNS_TIMEOUT": env.int(
                 "DNS_TIMEOUT",
